@@ -1,5 +1,12 @@
+modules = ["nodejs-24"]
 [nix]
 channel = "stable-25_05"
 
 [agent]
 expertMode = true
+
+[userenv]
+
+[userenv.shared]
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = "sb_publishable_Tum9q7YjjFJmJu7QzStPng_wXyiXeCP"
+NEXT_PUBLIC_SUPABASE_URL = "https://njamswtfqcyrfrjjradj.supabase.co"
