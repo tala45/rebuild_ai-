@@ -57,7 +57,13 @@ export async function POST(request: Request) {
         storage_path: input.imagePath,
         content_type: input.imageType,
       });
-      if (imageError) throw imageError;
+      if (imageError) {
+        const { error: cleanupError } = await supabase.from("materials").delete().eq("id", data.id).eq("owner_id", user.id);
+        if (cleanupError) {
+          throw new Error(`Could not save the image metadata. The material record may need cleanup: ${cleanupError.message}`);
+        }
+        throw imageError;
+      }
     }
     const analysis = analyzeMaterial(input);
     await supabase.from("ai_analyses").insert({ material_id: data.id, owner_id: user.id, method: analysis.method, result: analysis });

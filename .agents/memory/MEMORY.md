@@ -1,0 +1,1 @@
+- [REBUILD interface priorities](rebuild-ui-principles.md) — Keep the workspace simple and make rule-based guidance’s contribution explicit.

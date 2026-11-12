@@ -2,44 +2,40 @@
 
 REBUILD AI helps individuals, students, workshops, and engineering teams record surplus materials and choose a practical next step: sell, reuse, or dispose responsibly.
 
-This project uses the Next.js App Router and Supabase. Analysis and assistant replies are rule-based; they do not use an external AI service or analyze images. The app does not process payments or confirm recycling automatically.
+The app runs in browser-only demo mode by default, with optional Supabase integration. Analysis and assistant replies are rule-based; they do not use an external AI service or analyze images. The app does not process payments or confirm recycling automatically.
 
 ## What works
 
-- Email sign-up, sign-in, session cookies, email verification callback, sign-out, and password-reset email flow through Supabase Auth.
-- Private material records with category, description, quantity, condition, and approximate location.
-- Private image upload to the `material-uploads` Supabase Storage bucket (JPEG, PNG, or WebP up to 5 MB).
+- Sample seller and buyer profiles, plus local profile creation and switching in the same browser.
+- Browser-local material records with category, description, quantity, condition, approximate location, and optional photo.
 - Cautious, rule-based material suggestions with uncertainty and safety limitations.
 - Marketplace listings, search by name/category, seller-managed listing state/price/fulfillment, and buyer order requests.
 - Order request acceptance and two-party completion confirmation. A listing is marked sold only after both people confirm completion. No payment is taken.
 - Reuse project suggestions, saved plans, and planned/completed reuse or disposal actions.
 - A basic assistant that uses the signed-in user’s material records and rule-based guidance.
 - Dashboard counts based on saved records. Planned and completed activities are counted separately.
-- Row Level Security (RLS) on user-related tables and private storage policies.
+- Optional Supabase Auth, PostgreSQL, private storage, and RLS when explicitly enabled.
+
+In local demo mode, records and photos stay in this browser and are not private or shared across devices. Do not enter real personal, business, or sensitive information. Local profiles do not use passwords, email verification, or password reset.
 
 Environmental savings, structural integrity, electrical safety, and chemical composition are not calculated or inferred.
 
 ## Technology
 
 - Next.js App Router, React, and TypeScript
-- Next.js Route Handlers with Zod input validation
-- Supabase Auth, PostgreSQL, and Storage
+- Browser `localStorage` for the demo; Supabase Auth, PostgreSQL, and Storage remain optional
 - Rule-based analysis; no paid AI, payment, or maps API
 
 ## Run in Replit
 
-1. Add the two public Supabase values as Replit environment variables:
-   - `NEXT_PUBLIC_SUPABASE_URL`
-   - `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`
-2. Apply the SQL migration described below.
-3. Start the `Start application` workflow, or run `npm run dev`.
-4. Open the app preview. `/` is public; `/dashboard` requires a verified Supabase session.
+1. Start the `Start application` workflow, or run `npm run dev`.
+2. Open the app preview and choose **Try the demo**. Use the sample seller and buyer profiles to exercise listings and two-sided handoffs.
 
-For local development, copy `.env.example` to `.env.local` and enter the public project URL and publishable key. Never commit `.env.local`.
+Supabase is not required for the browser demo. To opt in to the existing Supabase-backed mode, set `NEXT_PUBLIC_REBUILD_DATA_MODE=supabase`, add the public URL and publishable key, then follow the optional setup below.
 
 ## Supabase setup
 
-The application is intended to use the existing Supabase project. No service-role key or database password is needed by the application.
+Supabase mode is optional and must be explicitly enabled with `NEXT_PUBLIC_REBUILD_DATA_MODE=supabase`. No service-role key or database password is needed by the application.
 
 1. In the Supabase project dashboard, open **SQL Editor**.
 2. Open `supabase/migrations/20261112000000_initial.sql` in this repository, copy its contents, and run it once.
@@ -54,6 +50,7 @@ The SQL migration creates tables, indexes, RLS policies, a profile trigger, publ
 
 | Name | Purpose | Sensitive? |
 | --- | --- | --- |
+| `NEXT_PUBLIC_REBUILD_DATA_MODE` | `local` (default) or `supabase` | No |
 | `NEXT_PUBLIC_SUPABASE_URL` | Existing Supabase project URL | No |
 | `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Supabase client publishable key; RLS still applies | No |
 
@@ -64,12 +61,14 @@ No private server key is used. `.env.example` contains placeholders only.
 - `app/` — pages, layouts, and Route Handlers
 - `components/` — shared presentation and authentication components
 - `lib/analysis.ts` — rule-based material analysis and assistant guidance
+- `lib/demo-workspace.ts` — browser-local demo profiles and marketplace data
 - `lib/supabase/` — browser and server Supabase clients
 - `supabase/migrations/` — PostgreSQL schema, policies, trigger, and storage setup
 
 ## Security and privacy
 
-- The browser uses only the publishable key. Supabase RLS is required and must remain enabled.
+- Local demo mode is not private or secure; anyone using the same browser profile can inspect or change its data. Do not use it for real user data.
+- In Supabase mode, the browser uses only the publishable key. Supabase RLS is required and must remain enabled.
 - User-owned material data and private uploaded files are constrained to the authenticated user.
 - Marketplace listing rows and listed material descriptions are readable publicly; approximate locations should be used, not private addresses.
 - Profile records contain only a display name and timestamps. Do not add email addresses or private contact details to public profile fields.
@@ -85,11 +84,11 @@ npm run typecheck
 npm run build
 ```
 
-Authentication, database writes, storage uploads, and RLS behavior require the migration and Auth redirect configuration to be applied to the existing Supabase project. They should be checked with two separate Supabase accounts before public use. No production deployment has been configured.
+`npm run typecheck` and `npm run build` check the app code. The Supabase migration has not been applied or verified against the existing project; real authentication, database writes, storage, and RLS behavior remain unverified. No production deployment has been configured.
 
 ## GitHub
 
-The connected GitHub repository is `https://github.com/tala45/rebuild_ai-`. Keep `.env`, `.env.local`, secrets, and database contents out of commits. GitHub stores source code only; Supabase provides the database, authentication, and storage.
+Keep `.env`, `.env.local`, secrets, and any local database contents out of commits. GitHub stores source code only; browser demo records stay in the browser.
 
 ## Free-tier limitations
 

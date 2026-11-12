@@ -33,10 +33,21 @@ export async function GET(request: Request) {
       const firstPath = images?.[0]?.storage_path;
       const signed = firstPath ? await supabase.storage.from("material-uploads").createSignedUrl(firstPath, 3600) : null;
       const { seller_id, ...publicItem } = item;
+      const publicMaterial = material ? {
+        id: material.id,
+        name: material.name,
+        category: material.category,
+        description: material.description,
+        quantity: material.quantity,
+        unit: material.unit,
+        condition: material.condition,
+        approximate_location: material.approximate_location,
+        imageUrl: signed?.data?.signedUrl ?? null,
+      } : material;
       return {
         ...publicItem,
         isOwn: Boolean(user && seller_id === user.id),
-        material: material ? { ...material, imageUrl: signed?.data?.signedUrl ?? null } : material,
+        material: publicMaterial,
         seller: Array.isArray(item.profiles) ? item.profiles[0] : item.profiles,
         fulfillment: Array.isArray(item.fulfillment) ? item.fulfillment.join(", ") : item.fulfillment,
       };

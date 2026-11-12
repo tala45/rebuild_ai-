@@ -1,8 +1,10 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 import { getSupabaseConfig } from "./lib/supabase/config";
+import { isLocalDemoMode } from "./lib/app-mode";
 
 export async function proxy(request: NextRequest) {
+  if (isLocalDemoMode()) return NextResponse.next({ request });
   const config = getSupabaseConfig();
   if (!config) return NextResponse.next({ request });
 

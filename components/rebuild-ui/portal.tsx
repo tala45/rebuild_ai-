@@ -8,6 +8,17 @@ import {
   ShoppingBag, Sparkles, Trash2,
 } from "lucide-react";
 import { createClient as createBrowserClient } from "@/lib/supabase/browser";
+import { analyzeMaterial } from "@/lib/analysis";
+import {
+  demoApiRequest,
+  getDemoSession,
+  loginDemoAs,
+  loadDemoWorkspace,
+  setDemoSession,
+  signOutDemo,
+  type DemoUser,
+} from "@/lib/demo-workspace";
+import { isLocalDemoMode } from "@/lib/app-mode";
 import "./portal.css";
 
 export type RebuildSection = "dashboard" | "materials" | "marketplace" | "reuse" | "dispose" | "assistant" | "requests";
@@ -104,8 +115,36 @@ function requestMaterial(request: WorkRequest): Material | undefined {
   return request.material || request.listing?.material;
 }
 
+async function compressLocalPhoto(file: File) {
+  const bitmap = await createImageBitmap(file);
+  const canvas = document.createElement("canvas");
+  const maxEdge = 1400;
+  let scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height));
+  let quality = 0.82;
+  let dataUrl = "";
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    const context = canvas.getContext("2d");
+    if (!context) {
+      bitmap.close();
+      throw new Error("This browser could not prepare the image.");
+    }
+    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    dataUrl = canvas.toDataURL("image/jpeg", quality);
+    if (dataUrl.length <= 1_600_000) break;
+    if (quality > 0.5) quality -= 0.1;
+    else scale *= 0.8;
+  }
+  bitmap.close();
+  if (!dataUrl || dataUrl.length > 1_600_000) throw new Error("This image is too large for local browser storage. Choose a smaller photo.");
+  return dataUrl;
+}
+
 export default function RebuildPortal({ section }: SectionProps) {
   const router = useRouter();
+  const [demoMode, setDemoMode] = useState(false);
+  const [modeReady, setModeReady] = useState(false);
   const [active, setActive] = useState<RebuildSection>(section);
   const [materials, setMaterials] = useState<Material[]>([]);
   const [listings, setListings] = useState<Listing[]>([]);
@@ -115,8 +154,10 @@ export default function RebuildPortal({ section }: SectionProps) {
   const [savedProjects, setSavedProjects] = useState<SavedProject[]>([]);
   const [myListings, setMyListings] = useState<Listing[]>([]);
   const [currentUserId, setCurrentUserId] = useState("");
+  const [demoUsers, setDemoUsers] = useState<DemoUser[]>([]);
   const [photoFile, setPhotoFile] = useState<File | null>(null);
   const [lastAnalysis, setLastAnalysis] = useState<MaterialAnalysis | null>(null);
+  const [selectedAnalysisMaterial, setSelectedAnalysisMaterial] = useState<string>("");
   const [summary, setSummary] = useState<Record<string, unknown> | null>(null);
   const [loading, setLoading] = useState(true);
   const [pageError, setPageError] = useState("");
@@ -135,6 +176,10 @@ export default function RebuildPortal({ section }: SectionProps) {
 
   useEffect(() => setActive(section), [section]);
   useEffect(() => {
+    setDemoMode(isLocalDemoMode());
+    setModeReady(true);
+  }, []);
+  useEffect(() => {
     if (!toast) return;
     const timer = window.setTimeout(() => setToast(""), 2800);
     return () => window.clearTimeout(timer);
@@ -144,6 +189,21 @@ export default function RebuildPortal({ section }: SectionProps) {
     if (!quiet) setLoading(true);
     setPageError("");
     try {
+      if (demoMode) {
+        if (!getDemoSession()) loginDemoAs("demo-seller");
+        const workspace = loadDemoWorkspace();
+        setCurrentUserId(workspace.user.id);
+        setDemoUsers(workspace.users);
+        setSummary(workspace.summary);
+        setMaterials(workspace.materials);
+        setListings(workspace.listings);
+        setMyListings(workspace.myListings);
+        setRequests(workspace.requests);
+        setActions(workspace.actions);
+        setReuseProjects(workspace.projects);
+        setSavedProjects(workspace.savedProjects);
+        return;
+      }
       const endpoints: Array<[string, string]> = [];
        if (target === "dashboard") endpoints.push(["summary", "/api/summary"], ["materials", "/api/materials"], ["requests", "/api/requests"], ["actions", "/api/actions"]);
       if (target === "materials" || target === "reuse" || target === "dispose" || target === "assistant") endpoints.push(["materials", "/api/materials"]);
@@ -180,8 +240,8 @@ export default function RebuildPortal({ section }: SectionProps) {
     } finally {
       if (!quiet) setLoading(false);
     }
-  }, []);
-  useEffect(() => { void loadData(active); }, [active, loadData]);
+  }, [demoMode, router]);
+  useEffect(() => { if (modeReady) void loadData(active); }, [active, loadData, modeReady]);
 
   const navigate = (target: RebuildSection) => {
     setSearch("");
@@ -197,7 +257,8 @@ export default function RebuildPortal({ section }: SectionProps) {
     };
     router.push(routes[target]);
   };
-  const apiPost = async (url: string, method: "POST" | "PATCH", payload: Record<string, unknown>) => {
+  const apiPost = async (url: string, method: "POST" | "PATCH", payload: Record<string, unknown>): Promise<Record<string, unknown>> => {
+    if (demoMode) return demoApiRequest(url, method, payload) as Record<string, unknown>;
     const response = await fetch(url, { method, headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify(payload) });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error((body as { error?: string; message?: string }).error || (body as { message?: string }).message || `Request failed (${response.status}).`);
@@ -212,6 +273,23 @@ export default function RebuildPortal({ section }: SectionProps) {
     } finally { setBusy(false); }
   };
   const refresh = async () => loadData(active, true);
+  const switchDemoAccount = async (userId: string) => {
+    setBusy(true);
+    setNotice("");
+    try {
+      setDemoSession(userId);
+      await loadData(active, true);
+      setToast("Switched local demo account");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not switch accounts.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const exitDemo = () => {
+    signOutDemo();
+    router.replace("/login");
+  };
   const visibleMaterials = useMemo(() => materials.filter(item => `${item.name} ${item.category} ${item.description || ""} ${item.approximate_location || ""}`.toLowerCase().includes(search.toLowerCase())), [materials, search]);
   const visibleListings = useMemo(() => listings.filter(item => {
     const material = item.material;
@@ -223,18 +301,22 @@ export default function RebuildPortal({ section }: SectionProps) {
   const createMaterial = (event: React.FormEvent) => doSubmit(event, async () => {
     let imagePath: string | undefined;
     let imageType: string | undefined;
-    const supabase = createBrowserClient();
+    let imageDataUrl: string | undefined;
+    const supabase = demoMode ? null : createBrowserClient();
     if (photoFile) {
       if (!["image/jpeg", "image/png", "image/webp"].includes(photoFile.type)) throw new Error("Choose a JPEG, PNG, or WebP image.");
       if (photoFile.size > 5 * 1024 * 1024) throw new Error("Images must be 5 MB or smaller.");
-      if (!supabase) throw new Error("Supabase is not configured, so image upload is unavailable.");
-      const { data: { user }, error: authError } = await supabase.auth.getUser();
-      if (authError || !user) throw new Error("Sign in again before uploading an image.");
-      const extension = photoFile.type === "image/jpeg" ? "jpg" : photoFile.type === "image/png" ? "png" : "webp";
-      imagePath = `${user.id}/${crypto.randomUUID()}.${extension}`;
-      imageType = photoFile.type;
-      const { error: uploadError } = await supabase.storage.from("material-uploads").upload(imagePath, photoFile, { contentType: imageType, upsert: false });
-      if (uploadError) throw new Error(`Image upload failed: ${uploadError.message}`);
+      if (supabase) {
+        const { data: { user }, error: authError } = await supabase.auth.getUser();
+        if (authError || !user) throw new Error("Sign in again before uploading an image.");
+        const extension = photoFile.type === "image/jpeg" ? "jpg" : photoFile.type === "image/png" ? "png" : "webp";
+        imagePath = `${user.id}/${crypto.randomUUID()}.${extension}`;
+        imageType = photoFile.type;
+        const { error: uploadError } = await supabase.storage.from("material-uploads").upload(imagePath, photoFile, { contentType: imageType, upsert: false });
+        if (uploadError) throw new Error(`Image upload failed: ${uploadError.message}`);
+      } else {
+        imageDataUrl = await compressLocalPhoto(photoFile);
+      }
     }
     const payload = {
       name: materialForm.name,
@@ -246,6 +328,7 @@ export default function RebuildPortal({ section }: SectionProps) {
       location: materialForm.approximate_location,
       imagePath,
       imageType,
+      imageDataUrl,
     };
     try {
       const response = await apiPost("/api/materials", "POST", payload);
@@ -345,11 +428,20 @@ export default function RebuildPortal({ section }: SectionProps) {
   };
 
   const title = sectionInfo[active];
-  const header = <header className="rb-topbar"><div className="rb-shell rb-topbar-inner">
-    <div className="rb-brand"><span className="rb-mark"><Recycle aria-hidden="true" /></span><span>REBUILD AI<small>MATERIAL RECOVERY</small></span></div>
-    <nav className="rb-nav" aria-label="Workspace navigation">{navItems.map(item => <button key={item} aria-current={active === item ? "page" : undefined} onClick={() => navigate(item)}>{sectionInfo[item].label}</button>)}</nav>
-    <form action="/auth/signout" method="post"><button className="rb-profile" type="submit" aria-label="Sign out" title="Sign out"><LogOut size={15} /></button></form>
-  </div></header>;
+  const header = <>
+    {demoMode && <div className="rb-demo-banner"><div className="rb-shell"><strong>Local browser demo</strong><span>Data stays in this browser; profiles are not real accounts and are not private.</span></div></div>}
+    <header className="rb-topbar"><div className="rb-shell rb-topbar-inner">
+      <div className="rb-brand"><span className="rb-mark"><Recycle aria-hidden="true" /></span><span>REBUILD AI<small>MATERIAL RECOVERY</small></span></div>
+      <nav className="rb-nav" aria-label="Workspace navigation">{navItems.map(item => <button key={item} aria-current={active === item ? "page" : undefined} onClick={() => navigate(item)}>{sectionInfo[item].label}</button>)}</nav>
+      {demoMode ? <div className="rb-account-switch">
+        <label className="sr-only" htmlFor="demo-account">Switch demo profile</label>
+        <select id="demo-account" value={currentUserId} onChange={event => void switchDemoAccount(event.target.value)} disabled={busy}>
+          {demoUsers.map(user => <option key={user.id} value={user.id}>{user.display_name}</option>)}
+        </select>
+        <button className="rb-profile" type="button" onClick={exitDemo} aria-label="Exit local demo" title="Exit local demo"><LogOut size={15} /></button>
+      </div> : <form action="/auth/signout" method="post"><button className="rb-profile" type="submit" aria-label="Sign out" title="Sign out"><LogOut size={15} /></button></form>}
+    </div></header>
+  </>;
   const pageHeading = (action?: React.ReactNode) => <div className="rb-page-head"><div><div className="rb-overline">{title.label}</div><h1>{title.title}</h1><p>{title.description}</p></div>{action && <div className="rb-head-actions">{action}</div>}</div>;
   const feedback = notice ? <div className="rb-message error" role="alert"><CircleAlert />{notice}</div> : null;
   const empty = (headline: string, copy: string, icon: React.ReactNode, button?: React.ReactNode) => <div className="rb-empty"><span className="rb-empty-mark">{icon}</span><strong>{headline}</strong><p>{copy}</p>{button}</div>;
@@ -362,35 +454,63 @@ export default function RebuildPortal({ section }: SectionProps) {
       for (const key of keys) if (typeof summaryData[key] === "number" || typeof summaryData[key] === "string") return String(summaryData[key]);
       return "—";
     };
+    const focusMaterial = materials[0];
+    const focusAnalysis = focusMaterial ? analyzeMaterial({
+      name: focusMaterial.name,
+      category: focusMaterial.category,
+      description: focusMaterial.description,
+      condition: focusMaterial.condition,
+    }) : null;
     return <>
-      {pageHeading(<button className="rb-btn" onClick={() => navigate("materials")}><Plus />Add material</button>)}
+      <section className="rb-welcome">
+        <div className="rb-welcome-copy">
+          <span className="rb-overline">Your circular workspace</span>
+          <h1>Make room for<br /><em>what comes next.</em></h1>
+          <p>Record surplus, find it a new home, and keep the next step visible.</p>
+          <button className="rb-btn" onClick={() => navigate("materials")}><Plus />Add material</button>
+        </div>
+        <div className="rb-welcome-art" aria-hidden="true">
+          <div className="rb-orbit orbit-one" /><div className="rb-orbit orbit-two" />
+          <span className="rb-art-chip chip-a">LIST</span><span className="rb-art-chip chip-b">REUSE</span>
+          <Recycle className="rb-art-symbol" />
+          <span className="rb-art-caption">Useful things<br />keep moving.</span>
+        </div>
+      </section>
       {pageError && <div className="rb-message error" role="alert"><CircleAlert />{pageError}<button className="rb-quiet-link" onClick={() => void loadData(active)}>Retry</button></div>}
-      <div className="rb-stats">
-         {[
-           ["Materials recorded", getCount("materials")],
-           ["Active listings", getCount("activeListings")],
-           ["Completed sales", getCount("completedSales")],
-           ["Completed reuse", getCount("completedReuse")],
-           ["Completed disposal", getCount("completedDisposal")],
-           ["Open requests", getCount("incomingRequests")],
-         ].map(([label, value]) => <div className="rb-stat" key={label}><span className="rb-stat-label">{label}</span>{loading ? <div className="rb-skeleton" style={{ minHeight: 27, marginTop: 12 }} /> : <><strong className="rb-stat-value">{value}</strong><span className="rb-stat-note">from your workspace</span></>}</div>)}
+      <div className="rb-flow-strip" aria-label="Workspace activity summary">
+        <div><strong>{loading ? "—" : getCount("materials")}</strong><span>materials in your inventory</span></div>
+        <span className="rb-flow-divider" aria-hidden="true">→</span>
+        <div><strong>{loading ? "—" : getCount("activeListings")}</strong><span>open listings</span></div>
+        <span className="rb-flow-divider" aria-hidden="true">→</span>
+        <div><strong>{loading ? "—" : getCount("incomingRequests")}</strong><span>requests to follow up</span></div>
       </div>
-      <div className="rb-grid rb-dashboard-grid">
-        <div className="rb-panel"><div className="rb-panel-head"><h2>Recently added materials</h2><button className="rb-quiet-link" onClick={() => navigate("materials")}>View inventory <ArrowRight size={13} /></button></div>
+      <div className="rb-dashboard-grid rb-dashboard-story">
+        <div className="rb-panel rb-inventory-panel"><div className="rb-panel-head"><div><span className="rb-kicker">On your shelves</span><h2>Recent materials</h2></div><button className="rb-quiet-link" onClick={() => navigate("materials")}>View inventory <ArrowRight size={13} /></button></div>
           {loading ? renderLoading(3) : pageError ? null : materials.length ? <div className="rb-row-list">{materials.slice(0, 4).map(materialRow)}</div> : empty("Nothing in the inventory yet", "Add a material record to make surplus stock visible to your team.", <Package />, <button className="rb-btn" onClick={() => navigate("materials")}><Plus />Add first material</button>)}
         </div>
-        <div className="rb-panel"><div className="rb-panel-head"><h2>Choose a next step</h2><span>Useful paths</span></div><div className="rb-actions-list">
-          <button className="rb-action-tile" onClick={() => navigate("marketplace")}><span className="rb-action-icon"><ShoppingBag /></span><span><strong>Share through marketplace</strong><small>Offer stock to another team</small></span></button>
-          <button className="rb-action-tile" onClick={() => navigate("reuse")}><span className="rb-action-icon"><Hammer /></span><span><strong>Plan a reuse</strong><small>Keep material in circulation</small></span></button>
-          <button className="rb-action-tile" onClick={() => navigate("assistant")}><span className="rb-action-icon"><Sparkles /></span><span><strong>Ask about a material</strong><small>Get a text-based suggestion</small></span></button>
-        </div></div>
-        <div className="rb-panel"><div className="rb-panel-head"><h2>Request activity</h2><button className="rb-quiet-link" onClick={() => navigate("requests")}>Open requests <ArrowRight size={13} /></button></div>
-          {loading ? renderLoading(2) : requests.length ? <div className="rb-stack">{requests.slice(0, 3).map(req => <div className="rb-material-row" key={req.id}><span className="rb-material-symbol"><ClipboardList /></span><div className="rb-material-copy"><strong>{requestMaterial(req)?.name || `Request ${req.id}`}</strong><span>{displayName(req.buyer)} · {req.fulfillment || "Fulfillment to arrange"}</span></div><span className={`rb-tag ${statusTone(req.status)}`}>{req.status || "Pending"}</span></div>)}</div> : empty("No handoffs to track", "Requests will appear here when someone asks for one of your listings.", <ClipboardList />)}
+        <div className="rb-next-step">
+          <span className="rb-kicker">Keep it moving</span><h2>What should happen next?</h2>
+          <button className="rb-step-link" onClick={() => navigate("marketplace")}><span className="rb-step-number">01</span><span><strong>Find a new owner</strong><small>Publish or browse shared stock</small></span><ArrowRight /></button>
+          <button className="rb-step-link" onClick={() => navigate("reuse")}><span className="rb-step-number">02</span><span><strong>Plan a second use</strong><small>Keep a material in circulation</small></span><ArrowRight /></button>
+          <button className="rb-step-link" onClick={() => navigate("dispose")}><span className="rb-step-number">03</span><span><strong>Record responsible disposal</strong><small>When reuse is not suitable</small></span><ArrowRight /></button>
         </div>
-        <div className="rb-panel"><div className="rb-panel-head"><h2>Recent reuse and disposal</h2><span>Recorded actions</span></div>
-          {loading ? renderLoading(2) : actions.length ? <div className="rb-stack">{actions.slice(0, 4).map(action => <div className="rb-material-row" key={action.id}><span className="rb-material-symbol">{action.type === "reuse" ? <Hammer /> : <Trash2 />}</span><div className="rb-material-copy"><strong>{action.material_name || (action.type === "reuse" ? "Reuse activity" : "Disposal activity")}</strong><span>{action.type === "reuse" ? "Reuse" : "Disposal"} · {action.status} · {dateLabel(action.created_at)}</span></div><span className="rb-tag">{action.status}</span></div>)}</div> : empty("No material actions yet", "Planned and completed reuse or disposal actions will appear here.", <Recycle />)}
+        <div className="rb-guidance-preview">
+          <div className="rb-guidance-top"><span className="rb-guidance-mark"><Sparkles /></span><span className="rb-kicker">Material guide · rule-based</span></div>
+          {focusAnalysis ? <>
+            <h2>A thought for <em>{focusMaterial.name}</em></h2>
+            <p>{focusAnalysis.reuseIdeas[0]} could be worth exploring, based on its recorded {focusMaterial.category} category.</p>
+            <span className="rb-guide-meta">Uses your saved details · no image assessment</span>
+          </> : <>
+            <h2>Start with a material.</h2><p>Record surplus to see practical, category-based reuse and disposal guidance here.</p>
+            <button className="rb-quiet-link" onClick={() => navigate("materials")}>Add your first material <ArrowRight size={13} /></button>
+          </>}
+          <button className="rb-guide-open" onClick={() => navigate("assistant")}>Explore material guidance <ArrowRight /></button>
         </div>
-        <div className="rb-guidance"><strong><ShieldCheck size={14} style={{ verticalAlign: "-3px", marginRight: 5 }} />A note on safe reuse</strong>Records and suggestions help coordinate materials; they do not verify structural integrity, chemical contents, or suitability. Inspect stock and follow qualified guidance before use.</div>
+        <div className="rb-panel rb-activity-panel"><div className="rb-panel-head"><div><span className="rb-kicker">A clear next step</span><h2>Handoffs & activity</h2></div><button className="rb-quiet-link" onClick={() => navigate("requests")}>All requests <ArrowRight size={13} /></button></div>
+          {loading ? renderLoading(2) : requests.length ? <div className="rb-row-list">{requests.slice(0, 2).map(req => <div className="rb-material-row" key={req.id}><span className="rb-material-symbol"><ClipboardList /></span><div className="rb-material-copy"><strong>{requestMaterial(req)?.name || `Request ${req.id}`}</strong><span>{displayName(req.buyer)} · {req.fulfillment || "Fulfillment to arrange"}</span></div><span className={`rb-tag ${statusTone(req.status)}`}>{req.status || "Pending"}</span></div>)}</div> : <p className="rb-activity-empty">No handoffs yet. Requests and two-sided confirmations will show up here.</p>}
+          {actions.length > 0 && <div className="rb-activity-foot"><span>{actions.filter(item => item.status === "completed").length} reuse or disposal actions completed</span><button className="rb-quiet-link" onClick={() => navigate("reuse")}>See activity</button></div>}
+        </div>
+        <div className="rb-guidance rb-safety-note"><strong><ShieldCheck size={14} style={{ verticalAlign: "-3px", marginRight: 5 }} />Keep the final call human</strong>Guidance and records do not verify material safety, composition, or suitability. Inspect stock and follow qualified advice before use.</div>
       </div>
     </>;
   };
@@ -413,11 +533,11 @@ export default function RebuildPortal({ section }: SectionProps) {
         <form className="rb-form" onSubmit={createMaterial}>
           <Field label="Material name"><input required maxLength={100} value={materialForm.name} onChange={e => setMaterialForm({ ...materialForm, name: e.target.value })} placeholder="e.g. Birch plywood offcuts" /></Field>
           <Field label="Category"><select value={materialForm.category} onChange={e => setMaterialForm({ ...materialForm, category: e.target.value })}>{categoryOptions.map(option => <option key={option} value={option}>{option[0].toUpperCase() + option.slice(1)}</option>)}</select></Field>
-          <div className="rb-inline"><Field label="Quantity"><input type="number" min="0" step="any" required value={materialForm.quantity} onChange={e => setMaterialForm({ ...materialForm, quantity: e.target.value })} placeholder="0" /></Field><Field label="Unit"><input maxLength={30} value={materialForm.unit} onChange={e => setMaterialForm({ ...materialForm, unit: e.target.value })} placeholder="sheets, kg…" /></Field></div>
+          <div className="rb-inline"><Field label="Quantity"><input type="number" min="0" step="any" required value={materialForm.quantity} onChange={e => setMaterialForm({ ...materialForm, quantity: e.target.value })} placeholder="0" /></Field><Field label="Unit"><input maxLength={24} required value={materialForm.unit} onChange={e => setMaterialForm({ ...materialForm, unit: e.target.value })} placeholder="sheets, kg…" /></Field></div>
            <Field label="Condition"><select value={materialForm.condition} onChange={e => setMaterialForm({ ...materialForm, condition: e.target.value })}><option value="new">New</option><option value="good">Good</option><option value="fair">Fair</option><option value="poor">Poor</option><option value="unknown">Unknown</option></select></Field>
           <Field label="Approximate location"><input maxLength={120} value={materialForm.approximate_location} onChange={e => setMaterialForm({ ...materialForm, approximate_location: e.target.value })} placeholder="Building, workshop, or area" /></Field>
-          <Field label="Description"><textarea maxLength={1200} value={materialForm.description} onChange={e => setMaterialForm({ ...materialForm, description: e.target.value })} placeholder="Dimensions, specifications, or useful context" /></Field>
-           <Field label="Optional photo"><div className="rb-file"><input type="file" accept="image/jpeg,image/png,image/webp" aria-label="Optional material photo" onChange={e => setPhotoFile(e.target.files?.[0] ?? null)} /><span className="rb-field-hint">{photoFile ? `${photoFile.name} · saved privately with this material` : "JPEG, PNG, or WebP · up to 5 MB · stored privately"}</span></div></Field>
+          <Field label="Description"><textarea maxLength={1000} value={materialForm.description} onChange={e => setMaterialForm({ ...materialForm, description: e.target.value })} placeholder="Dimensions, specifications, or useful context" /></Field>
+           <Field label="Optional photo"><div className="rb-file"><input type="file" accept="image/jpeg,image/png,image/webp" aria-label="Optional material photo" onChange={e => setPhotoFile(e.target.files?.[0] ?? null)} /><span className="rb-field-hint">{photoFile ? `${photoFile.name} · ${demoMode ? "compressed and saved in this browser" : "saved privately with this material"}` : demoMode ? "JPEG, PNG, or WebP · up to 5 MB · compressed for this browser demo" : "JPEG, PNG, or WebP · up to 5 MB · stored privately"}</span></div></Field>
           <button className="rb-btn" disabled={busy}>{busy ? <><span className="rb-busy" />Saving…</> : <><Plus />Save material</>}</button>
         </form>
       </section>
@@ -556,7 +676,7 @@ export default function RebuildPortal({ section }: SectionProps) {
             {chosen && matchingRequirement && <p className="rb-field-hint">Quantity check: {quantityMatch ? "meets" : "below"} the listed minimum of {String(matchingRequirement.minimum_quantity ?? 0)} {String(matchingRequirement.unit ?? "")}. Confirm units and suitability before use.</p>}
             <button type="button" className="rb-btn" disabled={busy} onClick={() => void saveReuseProject(project.id)}><Plus />Save as planned project</button>
           </article>;
-        })}</div> : empty("No project ideas available", "Check the database migration and reload this page.", <Hammer />)}
+        })}</div> : empty("No project ideas available", "Reuse ideas will appear here when they are available.", <Hammer />)}
         {savedProjects.length > 0 && <div className="rb-stack" style={{ marginTop: 18 }}>
           <div className="rb-panel-head"><h2>Saved project plans</h2><span>{savedProjects.length} saved</span></div>
           {savedProjects.map(saved => <div className="rb-material-row" key={saved.id}><span className="rb-material-symbol"><ClipboardList /></span><div className="rb-material-copy"><strong>{saved.reuse_projects?.title || "Saved reuse project"}</strong><span>{saved.status}{saved.notes ? ` · ${saved.notes}` : ""}</span></div></div>)}
@@ -565,22 +685,41 @@ export default function RebuildPortal({ section }: SectionProps) {
     </>;
   };
 
-  const renderAssistant = () => <>
+  const renderAssistant = () => {
+    const analyzedMaterial = materials.find(item => String(item.id) === selectedAnalysisMaterial) || materials[0];
+    const materialGuidance = analyzedMaterial ? analyzeMaterial({
+      name: analyzedMaterial.name,
+      category: analyzedMaterial.category,
+      description: analyzedMaterial.description,
+      condition: analyzedMaterial.condition,
+    }) : null;
+    return <>
     {pageHeading()}
     {feedback}
     {pageError && <div className="rb-message error" role="alert"><CircleAlert />{pageError}<button className="rb-quiet-link" onClick={() => void loadData(active)}>Retry</button></div>}
-    <div className="rb-content-grid" style={{ marginTop: 16 }}>
-      <section className="rb-panel rb-chat"><div className="rb-panel-head"><h2>Ask a material question</h2><span><span className="rb-tag">Text guidance</span></span></div>
+    <div className="rb-assistant-layout" style={{ marginTop: 16 }}>
+      <section className="rb-panel rb-assistant-guide">
+        <div className="rb-panel-head"><div><span className="rb-kicker">Guidance from your records</span><h2>Start with what you have.</h2></div><span className="rb-tag">Rule-based</span></div>
+        {loading ? renderLoading(2) : materials.length ? <>
+          <Field label="Choose a saved material"><select value={analyzedMaterial ? String(analyzedMaterial.id) : ""} onChange={event => setSelectedAnalysisMaterial(event.target.value)}>{materials.map(item => <option key={item.id} value={item.id}>{item.name} · {item.category}</option>)}</select></Field>
+          {materialGuidance && <div className="rb-analysis-card">
+            <span className="rb-analysis-label">A possible next use</span>
+            <h3>{materialGuidance.reuseIdeas[0]}</h3>
+            <p>{materialGuidance.summary}</p>
+            <div className="rb-analysis-details"><span>{analyzedMaterial?.category} · {analyzedMaterial?.condition || "condition not noted"}</span><span>{analyzedMaterial?.quantity ?? "—"} {analyzedMaterial?.unit || "units"} recorded</span></div>
+            <div className="rb-message info"><ShieldCheck />{materialGuidance.safetyNote}</div>
+          </div>}
+        </> : empty("No saved materials to review", "Add stock to get guidance based on its recorded category and condition.", <Package />, <button className="rb-btn" onClick={() => navigate("materials")}><Plus />Add material</button>)}
+        <p className="rb-chat-disclaimer">This is practical, rule-based text guidance using the details you entered. It is not a connected generative AI model, image recognition, or a safety assessment.</p>
+      </section>
+      <section className="rb-panel rb-chat"><div className="rb-panel-head"><div><span className="rb-kicker">Ask a question</span><h2>Think through a next step.</h2></div><span className="rb-tag">Text guidance</span></div>
         {!chatHistory.length ? <div className="rb-empty" style={{ marginBottom: 16 }}><span className="rb-empty-mark"><MessageSquareText /></span><strong>Start with what you know</strong><p>Ask about a category, a possible next use, or how to think through a handoff.</p></div> : <div className="rb-chat-history" aria-live="polite">{chatHistory.map((item, index) => <div className={`rb-chat-bubble ${item.role === "user" ? "user" : ""}`} key={`${index}-${item.role}`}>{item.text}</div>)}</div>}
         <form className="rb-chat-form" onSubmit={askAssistant}><input aria-label="Ask the material assistant" value={question} maxLength={1000} onChange={e => setQuestion(e.target.value)} placeholder="What could I do with clean timber offcuts?" /><button className="rb-btn" disabled={busy || !question.trim()} aria-label="Send question">{busy ? <span className="rb-busy" /> : <Send />}</button></form>
-        <p className="rb-chat-disclaimer">Suggestions use your saved material details and are not a safety assessment. Inspect materials and consult a qualified person where needed.</p>
+        <p className="rb-chat-disclaimer">Answers are simple rule-based guidance informed by your saved material details—not a live AI model or safety assessment. Check the details and use qualified advice where needed.</p>
       </section>
-      <aside className="rb-grid">
-        <section className="rb-panel"><div className="rb-panel-head"><h2>In your inventory</h2><span>{materials.length} materials</span></div>{loading ? renderLoading(3) : materials.length ? <div className="rb-row-list">{materials.slice(0, 4).map(materialRow)}</div> : empty("No saved materials", "Add your stock to give the assistant more context.", <Package />, <button className="rb-btn" onClick={() => navigate("materials")}><Plus />Add material</button>)}</section>
-        <div className="rb-guidance"><strong>Keep the final call human</strong>Suggestions are text-based. They cannot confirm composition, structural integrity, electrical safety, or engineering suitability.</div>
-      </aside>
     </div>
   </>;
+  };
 
   let content: React.ReactNode;
   if (active === "dashboard") content = renderDashboard();

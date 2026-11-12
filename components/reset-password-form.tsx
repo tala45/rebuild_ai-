@@ -3,8 +3,10 @@
 import Link from "next/link";
 import { useState, type FormEvent } from "react";
 import { createClient } from "@/lib/supabase/browser";
+import { isLocalDemoMode } from "@/lib/app-mode";
 
 export function ResetPasswordForm() {
+  const localDemo = isLocalDemoMode();
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -36,7 +38,8 @@ export function ResetPasswordForm() {
   return <div className="auth-card">
     <div className="eyebrow">Account recovery</div>
     <h2>Choose a new password</h2>
-    <p>Use the link sent to your email, then set a new password here.</p>
+    <p>{localDemo ? "The browser-only demo does not store passwords or send email. Connect Supabase Auth to enable password reset." : "Use the link sent to your email, then set a new password here."}</p>
+    {localDemo ? <div className="form-foot"><Link href="/login">Open a local demo workspace</Link></div> : <>
     <form className="form" onSubmit={submit}>
       <div className="field"><label htmlFor="newPassword">New password</label><input id="newPassword" type="password" minLength={8} required autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 8 characters" /></div>
       {error && <div className="form-error" role="alert">{error}</div>}
@@ -44,5 +47,6 @@ export function ResetPasswordForm() {
       <button className="button button-primary" disabled={busy}>{busy ? "Updating…" : "Update password"}</button>
     </form>
     <div className="form-foot"><Link href="/login">Back to sign in</Link></div>
+    </>}
   </div>;
 }
