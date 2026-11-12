@@ -30,6 +30,9 @@ export function analyzeMaterial(input: AnalysisInput) {
   return {
     method: "rule_based" as const,
     suggestedCategory: input.category,
+    conditionProvided: input.condition || "unknown",
+    conditionSource: "User-entered; not visually assessed",
+    indicativeValue: null,
     summary: `Based on the details you provided, “${input.name}” may be suitable for reuse, parts recovery, or material-specific recycling. This is a text-based suggestion, not image recognition or a safety inspection.`,
     reuseIdeas: reuse,
     disposalGuidance: disposal,

@@ -55,6 +55,25 @@ create table if not exists public.listings (
   unique(material_id)
 );
 
+create or replace function public.guard_listing_updates()
+returns trigger language plpgsql security definer set search_path = '' as $$
+begin
+  if tg_op = 'INSERT' and new.status <> 'active' then
+    raise exception 'New listings must start active';
+  end if;
+  if new.status = 'sold' and not exists (
+    select 1 from public.order_requests r where r.listing_id = new.id and r.status = 'completed'
+  ) then
+    raise exception 'A listing can be marked sold only after both sides confirm a completed request';
+  end if;
+  new.updated_at := now();
+  return new;
+end;
+$$;
+drop trigger if exists guard_listing_updates on public.listings;
+create trigger guard_listing_updates before insert or update on public.listings
+  for each row execute procedure public.guard_listing_updates();
+
 create table if not exists public.inquiries (
   id uuid primary key default gen_random_uuid(),
   listing_id uuid not null references public.listings(id) on delete cascade,
@@ -79,6 +98,9 @@ create table if not exists public.order_requests (
   check (buyer_id <> seller_id)
 );
 
+create unique index if not exists order_requests_one_accepted_per_listing_idx
+  on public.order_requests(listing_id) where status in ('accepted','completed');
+
 create or replace function public.guard_order_request_updates()
 returns trigger language plpgsql set search_path = '' as $$
 declare
@@ -97,6 +119,11 @@ begin
     current_user_id = old.seller_id and old.status = 'requested' and new.status in ('accepted','declined')
   ) then
     raise exception 'Only the seller can accept or decline a new request';
+  end if;
+  if new.status = 'accepted' and not exists (
+    select 1 from public.listings l where l.id = new.listing_id and l.status = 'active'
+  ) then
+    raise exception 'This listing is no longer available';
   end if;
   if old.status = 'accepted' and new.buyer_completed_at is not null and new.seller_completed_at is not null then
     new.status := 'completed';
@@ -207,32 +234,61 @@ create policy "users update own profile" on public.profiles for update to authen
 
 create policy "owners and listed materials readable" on public.materials for select to anon, authenticated
   using (owner_id = (select auth.uid()) or exists (
-    select 1 from public.listings l where l.material_id = id and l.status = 'active'
+    select 1 from public.listings l where l.material_id = public.materials.id and l.status = 'active'
+  ) or exists (
+    select 1 from public.listings l join public.order_requests r on r.listing_id = l.id
+    where l.material_id = public.materials.id and (r.buyer_id = (select auth.uid()) or r.seller_id = (select auth.uid()))
   ));
 create policy "users create own materials" on public.materials for insert to authenticated with check (owner_id = (select auth.uid()));
 create policy "users update own materials" on public.materials for update to authenticated using (owner_id = (select auth.uid())) with check (owner_id = (select auth.uid()));
 create policy "users delete own materials" on public.materials for delete to authenticated using (owner_id = (select auth.uid()));
 
 create policy "owners read material images" on public.material_images for select to authenticated using (owner_id = (select auth.uid()));
+create policy "active listing image paths are public" on public.material_images for select to anon, authenticated using (
+  exists (select 1 from public.listings l where l.material_id = public.material_images.material_id and l.status = 'active')
+);
 create policy "owners add material images" on public.material_images for insert to authenticated with check (owner_id = (select auth.uid()) and exists (select 1 from public.materials m where m.id = material_id and m.owner_id = (select auth.uid())));
 create policy "owners delete material images" on public.material_images for delete to authenticated using (owner_id = (select auth.uid()));
 
 create policy "owners read analyses" on public.ai_analyses for select to authenticated using (owner_id = (select auth.uid()));
 create policy "owners create analyses" on public.ai_analyses for insert to authenticated with check (owner_id = (select auth.uid()) and exists (select 1 from public.materials m where m.id = material_id and m.owner_id = (select auth.uid())));
 
-create policy "active listings are public" on public.listings for select to anon, authenticated using (status = 'active' or seller_id = (select auth.uid()));
-create policy "owners create listings" on public.listings for insert to authenticated with check (seller_id = (select auth.uid()) and exists (select 1 from public.materials m where m.id = material_id and m.owner_id = (select auth.uid())));
-create policy "owners update listings" on public.listings for update to authenticated using (seller_id = (select auth.uid())) with check (seller_id = (select auth.uid()));
+create policy "active listings and order participants are readable" on public.listings for select to anon, authenticated using (
+  status = 'active' or seller_id = (select auth.uid()) or exists (
+    select 1 from public.order_requests r where r.listing_id = public.listings.id
+      and (r.buyer_id = (select auth.uid()) or r.seller_id = (select auth.uid()))
+  )
+);
+create policy "owners create listings" on public.listings for insert to authenticated with check (seller_id = (select auth.uid()) and status = 'active' and exists (select 1 from public.materials m where m.id = material_id and m.owner_id = (select auth.uid())));
+create policy "owners update listings" on public.listings for update to authenticated using (seller_id = (select auth.uid())) with check (
+  seller_id = (select auth.uid()) and exists (select 1 from public.materials m where m.id = material_id and m.owner_id = (select auth.uid()))
+);
 create policy "owners delete listings" on public.listings for delete to authenticated using (seller_id = (select auth.uid()));
 
 create policy "participants read inquiries" on public.inquiries for select to authenticated using (sender_id = (select auth.uid()) or seller_id = (select auth.uid()));
-create policy "signed-in users send inquiries" on public.inquiries for insert to authenticated with check (sender_id = (select auth.uid()) and sender_id <> seller_id);
+create policy "signed-in users send inquiries" on public.inquiries for insert to authenticated with check (
+  sender_id = (select auth.uid()) and sender_id <> seller_id and exists (
+    select 1 from public.listings l where l.id = public.inquiries.listing_id and l.seller_id = public.inquiries.seller_id and l.status = 'active'
+  )
+);
 create policy "participants read order requests" on public.order_requests for select to authenticated using (buyer_id = (select auth.uid()) or seller_id = (select auth.uid()));
-create policy "buyers create order requests" on public.order_requests for insert to authenticated with check (buyer_id = (select auth.uid()) and buyer_id <> seller_id);
+create policy "buyers create order requests" on public.order_requests for insert to authenticated with check (
+  buyer_id = (select auth.uid()) and buyer_id <> seller_id and exists (
+    select 1 from public.listings l where l.id = public.order_requests.listing_id
+      and l.seller_id = public.order_requests.seller_id and l.status = 'active'
+      and public.order_requests.fulfillment = any(l.fulfillment)
+  )
+);
 create policy "participants update order requests" on public.order_requests for update to authenticated using (buyer_id = (select auth.uid()) or seller_id = (select auth.uid())) with check (buyer_id = (select auth.uid()) or seller_id = (select auth.uid()));
 
 create policy "reuse ideas are public" on public.reuse_projects for select to anon, authenticated using (true);
-create policy "users save own projects" on public.saved_projects for all to authenticated using (owner_id = (select auth.uid())) with check (owner_id = (select auth.uid()));
+create policy "users save own projects" on public.saved_projects for all to authenticated using (owner_id = (select auth.uid())) with check (
+  owner_id = (select auth.uid()) and (
+    material_id is null or exists (
+      select 1 from public.materials m where m.id = public.saved_projects.material_id and m.owner_id = (select auth.uid())
+    )
+  )
+);
 create policy "users manage own material actions" on public.material_actions for all to authenticated using (owner_id = (select auth.uid())) with check (owner_id = (select auth.uid()) and exists (select 1 from public.materials m where m.id = material_id and m.owner_id = (select auth.uid())));
 create policy "users manage own notifications" on public.notifications for all to authenticated using (owner_id = (select auth.uid())) with check (owner_id = (select auth.uid()));
 
@@ -251,5 +307,11 @@ create policy "owners upload material images" on storage.objects for insert to a
   with check (bucket_id = 'material-uploads' and (storage.foldername(name))[1] = (select auth.uid())::text);
 create policy "owners read material images" on storage.objects for select to authenticated
   using (bucket_id = 'material-uploads' and (storage.foldername(name))[1] = (select auth.uid())::text);
+create policy "active listing images may be signed" on storage.objects for select to anon, authenticated
+  using (bucket_id = 'material-uploads' and exists (
+    select 1 from public.material_images mi
+    join public.listings l on l.material_id = mi.material_id
+    where mi.storage_path = name and l.status = 'active'
+  ));
 create policy "owners delete material images" on storage.objects for delete to authenticated
   using (bucket_id = 'material-uploads' and (storage.foldername(name))[1] = (select auth.uid())::text);

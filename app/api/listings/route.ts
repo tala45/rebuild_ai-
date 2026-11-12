@@ -16,7 +16,7 @@ export async function GET(request: Request) {
     const q = url.searchParams.get("q")?.trim().slice(0, 80);
     const category = url.searchParams.get("category");
     const mine = url.searchParams.get("mine") === "1";
-    let query = supabase.from("listings").select("id,seller_id,asking_price,fulfillment,created_at,materials!inner(id,name,category,description,quantity,unit,condition,approximate_location),profiles!listings_seller_id_fkey(display_name)").order("created_at", { ascending: false });
+    let query = supabase.from("listings").select("id,seller_id,asking_price,fulfillment,created_at,materials!inner(id,name,category,description,quantity,unit,condition,approximate_location,material_images(storage_path)),profiles!listings_seller_id_fkey(display_name)").order("created_at", { ascending: false });
     if (mine) {
       if (!user) return NextResponse.json({ error: "Sign in to view your listings." }, { status: 401 });
       query = query.eq("seller_id", user.id);
@@ -27,13 +27,21 @@ export async function GET(request: Request) {
     if (category && category !== "all") query = query.eq("materials.category", category);
     const { data, error } = await query;
     if (error) throw error;
-    const listings = (data ?? []).map((item) => ({
-      ...item,
-      material: Array.isArray(item.materials) ? item.materials[0] : item.materials,
-      seller: Array.isArray(item.profiles) ? item.profiles[0] : item.profiles,
-      fulfillment: Array.isArray(item.fulfillment) ? item.fulfillment.join(", ") : item.fulfillment,
+    const listings = await Promise.all((data ?? []).map(async (item) => {
+      const material = Array.isArray(item.materials) ? item.materials[0] : item.materials;
+      const images = material && (Array.isArray(material.material_images) ? material.material_images : []);
+      const firstPath = images?.[0]?.storage_path;
+      const signed = firstPath ? await supabase.storage.from("material-uploads").createSignedUrl(firstPath, 3600) : null;
+      const { seller_id, ...publicItem } = item;
+      return {
+        ...publicItem,
+        isOwn: Boolean(user && seller_id === user.id),
+        material: material ? { ...material, imageUrl: signed?.data?.signedUrl ?? null } : material,
+        seller: Array.isArray(item.profiles) ? item.profiles[0] : item.profiles,
+        fulfillment: Array.isArray(item.fulfillment) ? item.fulfillment.join(", ") : item.fulfillment,
+      };
     }));
-    return NextResponse.json({ listings });
+    return NextResponse.json({ listings, userId: user?.id ?? null });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Could not load listings." }, { status: 500 });
   }

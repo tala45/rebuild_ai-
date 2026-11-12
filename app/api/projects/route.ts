@@ -34,7 +34,7 @@ export async function POST(request: Request) {
     const parsed = saveSchema.safeParse(await request.json());
     if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0]?.message ?? "Check the project details." }, { status: 400 });
     if (parsed.data.materialId) {
-      const { data: material, error } = await supabase.from("materials").select("id").eq("id", parsed.data.materialId).single();
+      const { data: material, error } = await supabase.from("materials").select("id").eq("id", parsed.data.materialId).eq("owner_id", user.id).single();
       if (error || !material) return NextResponse.json({ error: "Choose one of your own materials." }, { status: 404 });
     }
     const { data, error } = await supabase.from("saved_projects").insert({

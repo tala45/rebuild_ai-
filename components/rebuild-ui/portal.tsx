@@ -23,9 +23,11 @@ type Material = {
   approximate_location?: string;
   status?: string;
   created_at?: string;
+  imageUrl?: string | null;
 };
 type Listing = {
   id: string | number;
+  isOwn?: boolean;
   asking_price?: number | string | null;
   fulfillment?: string;
   created_at?: string;
@@ -53,6 +55,7 @@ type WorkRequest = {
 type ActionRecord = { id: string | number; type: "reuse" | "disposal"; status: "planned" | "completed"; notes?: string; disposal_category?: string; material_name?: string; created_at?: string };
 type ReuseProject = { id: string; title: string; description: string; categories: string[]; requirements: unknown[] };
 type SavedProject = { id: string; project_id: string; material_id?: string | null; status: string; notes?: string; reuse_projects?: { title?: string } };
+type MaterialAnalysis = { method: string; suggestedCategory: string; conditionProvided: string; conditionSource: string; indicativeValue: number | null; summary: string; reuseIdeas: string[]; disposalGuidance: string; confidence: string; safetyNote: string };
 type SectionProps = { section: RebuildSection };
 
 const sectionInfo: Record<RebuildSection, { label: string; title: string; description: string }> = {
@@ -71,7 +74,7 @@ function unwrapList<T>(data: unknown): T[] {
   if (Array.isArray(data)) return data as T[];
   if (data && typeof data === "object") {
     const obj = data as Record<string, unknown>;
-    for (const key of ["data", "materials", "listings", "requests", "actions", "items", "results"]) {
+    for (const key of ["data", "materials", "listings", "requests", "actions", "projects", "items", "results"]) {
       if (Array.isArray(obj[key])) return obj[key] as T[];
     }
   }
@@ -89,7 +92,7 @@ function dateLabel(value?: string) {
 function money(value?: number | string | null) {
   if (value === null || value === undefined || value === "") return "Contact seller";
   const amount = Number(value);
-  return Number.isNaN(amount) ? String(value) : new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 2 }).format(amount);
+  return Number.isNaN(amount) ? String(value) : amount === 0 ? "Free" : `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(amount)} · currency to agree`;
 }
 function statusTone(status?: string) {
   if (!status) return "neutral";
@@ -113,11 +116,14 @@ export default function RebuildPortal({ section }: SectionProps) {
   const [myListings, setMyListings] = useState<Listing[]>([]);
   const [currentUserId, setCurrentUserId] = useState("");
   const [photoFile, setPhotoFile] = useState<File | null>(null);
+  const [lastAnalysis, setLastAnalysis] = useState<MaterialAnalysis | null>(null);
   const [summary, setSummary] = useState<Record<string, unknown> | null>(null);
   const [loading, setLoading] = useState(true);
   const [pageError, setPageError] = useState("");
   const [toast, setToast] = useState("");
   const [search, setSearch] = useState("");
+  const [listingCategory, setListingCategory] = useState("all");
+  const [listingCondition, setListingCondition] = useState("all");
   const [busy, setBusy] = useState(false);
   const [materialForm, setMaterialForm] = useState({ name: "", category: "wood", description: "", quantity: "", unit: "", condition: "good", approximate_location: "" });
   const [listingForm, setListingForm] = useState({ material_id: "", asking_price: "", fulfillment: "pickup" });
@@ -139,7 +145,7 @@ export default function RebuildPortal({ section }: SectionProps) {
     setPageError("");
     try {
       const endpoints: Array<[string, string]> = [];
-      if (target === "dashboard") endpoints.push(["summary", "/api/summary"], ["materials", "/api/materials"], ["requests", "/api/requests"]);
+       if (target === "dashboard") endpoints.push(["summary", "/api/summary"], ["materials", "/api/materials"], ["requests", "/api/requests"], ["actions", "/api/actions"]);
       if (target === "materials" || target === "reuse" || target === "dispose" || target === "assistant") endpoints.push(["materials", "/api/materials"]);
        if (target === "reuse" || target === "dispose") endpoints.push(["actions", "/api/actions"]);
        if (target === "reuse") endpoints.push(["projects", "/api/projects"]);
@@ -154,7 +160,10 @@ export default function RebuildPortal({ section }: SectionProps) {
       for (const [key, body] of responses) {
         if (key === "summary") setSummary(body as Record<string, unknown>);
         if (key === "materials") setMaterials(unwrapList<Material>(body));
-        if (key === "listings") setListings(unwrapList<Listing>(body));
+         if (key === "listings") {
+           setListings(unwrapList<Listing>(body));
+           if (typeof (body as { userId?: unknown }).userId === "string") setCurrentUserId((body as { userId: string }).userId);
+         }
          if (key === "myListings") setMyListings(unwrapList<Listing>(body));
          if (key === "actions") setActions(unwrapList<ActionRecord>(body));
          if (key === "projects") {
@@ -206,8 +215,10 @@ export default function RebuildPortal({ section }: SectionProps) {
   const visibleMaterials = useMemo(() => materials.filter(item => `${item.name} ${item.category} ${item.description || ""} ${item.approximate_location || ""}`.toLowerCase().includes(search.toLowerCase())), [materials, search]);
   const visibleListings = useMemo(() => listings.filter(item => {
     const material = item.material;
-    return `${material?.name || ""} ${material?.category || ""} ${material?.description || ""} ${displayName(item.seller as Listing["seller"])}`.toLowerCase().includes(search.toLowerCase());
-  }), [listings, search]);
+    return `${material?.name || ""} ${material?.category || ""} ${material?.description || ""} ${displayName(item.seller as Listing["seller"])}`.toLowerCase().includes(search.toLowerCase())
+      && (listingCategory === "all" || material?.category === listingCategory)
+      && (listingCondition === "all" || material?.condition === listingCondition);
+  }), [listings, search, listingCategory, listingCondition]);
 
   const createMaterial = (event: React.FormEvent) => doSubmit(event, async () => {
     let imagePath: string | undefined;
@@ -237,7 +248,8 @@ export default function RebuildPortal({ section }: SectionProps) {
       imageType,
     };
     try {
-      await apiPost("/api/materials", "POST", payload);
+      const response = await apiPost("/api/materials", "POST", payload);
+      if (response.analysis && typeof response.analysis === "object") setLastAnalysis(response.analysis as MaterialAnalysis);
     } catch (error) {
       if (imagePath && supabase) await supabase.storage.from("material-uploads").remove([imagePath]);
       throw error;
@@ -354,7 +366,14 @@ export default function RebuildPortal({ section }: SectionProps) {
       {pageHeading(<button className="rb-btn" onClick={() => navigate("materials")}><Plus />Add material</button>)}
       {pageError && <div className="rb-message error" role="alert"><CircleAlert />{pageError}<button className="rb-quiet-link" onClick={() => void loadData(active)}>Retry</button></div>}
       <div className="rb-stats">
-        {[["Materials listed", getCount("materials_count", "material_count", "materials")], ["Active listings", getCount("active_listings", "listings_count", "listing_count", "listings")], ["Open requests", getCount("open_requests", "requests_count", "request_count", "requests")], ["Reuse actions", getCount("reuse_actions", "reuse_count")]].map(([label, value]) => <div className="rb-stat" key={label}><span className="rb-stat-label">{label}</span>{loading ? <div className="rb-skeleton" style={{ minHeight: 27, marginTop: 12 }} /> : <><strong className="rb-stat-value">{value}</strong><span className="rb-stat-note">from your workspace</span></>}</div>)}
+         {[
+           ["Materials recorded", getCount("materials")],
+           ["Active listings", getCount("activeListings")],
+           ["Completed sales", getCount("completedSales")],
+           ["Completed reuse", getCount("completedReuse")],
+           ["Completed disposal", getCount("completedDisposal")],
+           ["Open requests", getCount("incomingRequests")],
+         ].map(([label, value]) => <div className="rb-stat" key={label}><span className="rb-stat-label">{label}</span>{loading ? <div className="rb-skeleton" style={{ minHeight: 27, marginTop: 12 }} /> : <><strong className="rb-stat-value">{value}</strong><span className="rb-stat-note">from your workspace</span></>}</div>)}
       </div>
       <div className="rb-grid rb-dashboard-grid">
         <div className="rb-panel"><div className="rb-panel-head"><h2>Recently added materials</h2><button className="rb-quiet-link" onClick={() => navigate("materials")}>View inventory <ArrowRight size={13} /></button></div>
@@ -368,6 +387,9 @@ export default function RebuildPortal({ section }: SectionProps) {
         <div className="rb-panel"><div className="rb-panel-head"><h2>Request activity</h2><button className="rb-quiet-link" onClick={() => navigate("requests")}>Open requests <ArrowRight size={13} /></button></div>
           {loading ? renderLoading(2) : requests.length ? <div className="rb-stack">{requests.slice(0, 3).map(req => <div className="rb-material-row" key={req.id}><span className="rb-material-symbol"><ClipboardList /></span><div className="rb-material-copy"><strong>{requestMaterial(req)?.name || `Request ${req.id}`}</strong><span>{displayName(req.buyer)} · {req.fulfillment || "Fulfillment to arrange"}</span></div><span className={`rb-tag ${statusTone(req.status)}`}>{req.status || "Pending"}</span></div>)}</div> : empty("No handoffs to track", "Requests will appear here when someone asks for one of your listings.", <ClipboardList />)}
         </div>
+        <div className="rb-panel"><div className="rb-panel-head"><h2>Recent reuse and disposal</h2><span>Recorded actions</span></div>
+          {loading ? renderLoading(2) : actions.length ? <div className="rb-stack">{actions.slice(0, 4).map(action => <div className="rb-material-row" key={action.id}><span className="rb-material-symbol">{action.type === "reuse" ? <Hammer /> : <Trash2 />}</span><div className="rb-material-copy"><strong>{action.material_name || (action.type === "reuse" ? "Reuse activity" : "Disposal activity")}</strong><span>{action.type === "reuse" ? "Reuse" : "Disposal"} · {action.status} · {dateLabel(action.created_at)}</span></div><span className="rb-tag">{action.status}</span></div>)}</div> : empty("No material actions yet", "Planned and completed reuse or disposal actions will appear here.", <Recycle />)}
+        </div>
         <div className="rb-guidance"><strong><ShieldCheck size={14} style={{ verticalAlign: "-3px", marginRight: 5 }} />A note on safe reuse</strong>Records and suggestions help coordinate materials; they do not verify structural integrity, chemical contents, or suitability. Inspect stock and follow qualified guidance before use.</div>
       </div>
     </>;
@@ -376,6 +398,15 @@ export default function RebuildPortal({ section }: SectionProps) {
   const renderMaterials = () => <>
     {pageHeading()}
     {feedback}
+    {lastAnalysis && <div className="rb-panel" style={{ marginBottom: 16 }}>
+      <div className="rb-panel-head"><h2>Rule-based material guidance</h2><span>{lastAnalysis.confidence}</span></div>
+      <p><strong>Suggested category:</strong> {lastAnalysis.suggestedCategory} · <strong>Condition:</strong> {lastAnalysis.conditionProvided} ({lastAnalysis.conditionSource})</p>
+      <p><strong>Value estimate:</strong> Not provided; there is not enough verified market information.</p>
+      <p>{lastAnalysis.summary}</p>
+      <strong>Possible next uses</strong><p>{lastAnalysis.reuseIdeas.join(" · ")}</p>
+      <strong>Disposal guidance</strong><p>{lastAnalysis.disposalGuidance}</p>
+      <div className="rb-message info"><ShieldCheck />{lastAnalysis.safetyNote}</div>
+    </div>}
     {pageError && <div className="rb-message error" role="alert"><CircleAlert />{pageError}<button className="rb-quiet-link" onClick={() => void loadData(active)}>Retry</button></div>}
     <div className="rb-content-grid" style={{ marginTop: 16 }}>
       <section className="rb-panel"><div className="rb-panel-head"><h2>Add a material</h2><span>Inventory record</span></div>
@@ -421,27 +452,29 @@ export default function RebuildPortal({ section }: SectionProps) {
         <div className="rb-request-head"><div><h3>{item.material?.name || "Your material"}</h3><span className="rb-tag">{String(item.status || "active")}</span></div><span className="rb-tag neutral">{item.fulfillment}</span></div>
         <div className="rb-inline">
           <Field label="Asking amount"><input type="number" min="0" step="0.01" value={String(item.asking_price ?? 0)} onChange={e => setMyListings(current => current.map(row => row.id === item.id ? { ...row, asking_price: e.target.value } : row))} /></Field>
-          <button type="button" className="rb-btn secondary" disabled={busy || item.status === "sold"} onClick={async () => { setBusy(true); try { await apiPost(`/api/listings/${item.id}`, "PATCH", { askingPrice: Number(item.asking_price ?? 0) }); setToast("Listing updated"); await refresh(); } catch (error) { setNotice(error instanceof Error ? error.message : "Could not update listing."); } finally { setBusy(false); } }}>Save amount</button>
+          <Field label="Fulfillment"><select value={String(item.fulfillment || "pickup").toLowerCase()} onChange={e => setMyListings(current => current.map(row => row.id === item.id ? { ...row, fulfillment: e.target.value } : row))}><option value="pickup">Pickup</option><option value="shipping">Shipping</option></select></Field>
         </div>
+        <button type="button" className="rb-btn secondary" disabled={busy || item.status === "sold"} onClick={async () => { setBusy(true); try { await apiPost(`/api/listings/${item.id}`, "PATCH", { askingPrice: Number(item.asking_price ?? 0), fulfillment: [String(item.fulfillment || "pickup").toLowerCase()] }); setToast("Listing updated"); await refresh(); } catch (error) { setNotice(error instanceof Error ? error.message : "Could not update listing."); } finally { setBusy(false); } }}>Save listing changes</button>
         {item.status !== "sold" && item.status !== "closed" && <button type="button" className="rb-btn secondary" disabled={busy} onClick={async () => { setBusy(true); try { await apiPost(`/api/listings/${item.id}`, "PATCH", { status: item.status === "paused" ? "active" : "paused" }); setToast(item.status === "paused" ? "Listing reactivated" : "Listing paused"); await refresh(); } catch (error) { setNotice(error instanceof Error ? error.message : "Could not update listing."); } finally { setBusy(false); } }}>{item.status === "paused" ? "Reactivate listing" : "Pause listing"}</button>}
       </article>)}</div>
     </section>}
     <section className="rb-panel" style={{ marginTop: 16 }}>
       <div className="rb-panel-head"><h2>Available materials</h2><span>Listings shared with your workspace</span></div>
-      <div className="rb-toolbar"><div className="rb-search-wrap"><Search /><input className="rb-search" value={search} onChange={e => setSearch(e.target.value)} placeholder="Search available materials" aria-label="Search marketplace listings" /></div><div className="rb-toolbar-end"><button className="rb-btn secondary" onClick={() => void loadData(active)}><LoaderCircle size={15} />Refresh</button><button className="rb-btn" onClick={() => navigate("materials")}><Plus />Add stock</button></div></div>
+      <div className="rb-toolbar"><div className="rb-search-wrap"><Search /><input className="rb-search" value={search} onChange={e => setSearch(e.target.value)} placeholder="Search available materials" aria-label="Search marketplace listings" /></div><div className="rb-toolbar-end"><select aria-label="Filter by category" value={listingCategory} onChange={e => setListingCategory(e.target.value)}><option value="all">All categories</option>{categoryOptions.map(option => <option key={option} value={option}>{option}</option>)}</select><select aria-label="Filter by condition" value={listingCondition} onChange={e => setListingCondition(e.target.value)}><option value="all">Any condition</option>{["new", "good", "fair", "poor", "unknown"].map(option => <option key={option} value={option}>{option}</option>)}</select><button className="rb-btn secondary" onClick={() => void loadData(active)}><LoaderCircle size={15} />Refresh</button><button className="rb-btn" onClick={() => navigate("materials")}><Plus />Add stock</button></div></div>
       {loading ? renderLoading(4) : pageError ? null : visibleListings.length ? <div className="rb-cards">{visibleListings.map(listing => <article className="rb-card" key={listing.id}>
+        {listing.material?.imageUrl && <img className="rb-card-image" src={listing.material.imageUrl} alt={`Photo of ${listing.material?.name || "listed material"}`} />}
         <div className="rb-card-top"><div><h3>{listing.material?.name || "Material listing"}</h3><span className="rb-tag">{listing.material?.category || "Uncategorized"}</span></div><span className="rb-price">{money(listing.asking_price)}</span></div>
         <p>{listing.material?.description || "No additional material details provided."}</p>
         <div className="rb-card-meta"><span className="rb-tag neutral">{listing.material?.quantity ?? "—"} {listing.material?.unit || "units"}</span><span className="rb-tag neutral">{listing.material?.condition || "Condition not noted"}</span><span className="rb-tag neutral">{listing.fulfillment || "Arrange directly"}</span></div>
         <div className="rb-card-bottom"><span><MapPin size={12} style={{ verticalAlign: "-2px" }} /> {listing.material?.approximate_location || "Location not shared"}</span><span>By {displayName(listing.seller)}</span></div>
-        <button className="rb-btn" style={{ marginTop: 12 }} onClick={() => { setRequestForm({ ...requestForm, listing_id: String(listing.id) }); setNotice(""); document.getElementById("rb-request-form")?.scrollIntoView({ behavior: "smooth", block: "center" }); }}>Request material <ArrowRight /></button>
+        {listing.isOwn ? <span className="rb-tag neutral" style={{ marginTop: 12 }}>Your listing</span> : <button className="rb-btn" style={{ marginTop: 12 }} onClick={() => { setRequestForm({ ...requestForm, listing_id: String(listing.id) }); setNotice(""); document.getElementById("rb-request-form")?.scrollIntoView({ behavior: "smooth", block: "center" }); }}>Request material <ArrowRight /></button>}
       </article>)}</div> : empty(search ? "No listings match that search" : "No listings available right now", "Check back later, or make surplus stock visible by adding a material and listing it.", <ShoppingBag />)}
     </section>
     <section className="rb-panel" id="rb-request-form" style={{ marginTop: 16 }}>
       <div className="rb-panel-head"><h2>Send a material request</h2><span>Coordinate directly</span></div>
       <form className="rb-form" onSubmit={sendRequest}>
          <div className="rb-inline"><Field label="Listing"><select required value={requestForm.listing_id} onChange={e => setRequestForm({ ...requestForm, listing_id: e.target.value })}><option value="">Choose a listing</option>{listings.map(item => <option key={item.id} value={item.id}>{item.material?.name || `Listing ${item.id}`}</option>)}</select></Field><Field label="Fulfillment"><select value={requestForm.fulfillment} onChange={e => setRequestForm({ ...requestForm, fulfillment: e.target.value })}><option value="pickup">Pickup</option><option value="shipping">Shipping</option></select></Field></div>
-        <Field label="Message"><textarea maxLength={1000} value={requestForm.message} onChange={e => setRequestForm({ ...requestForm, message: e.target.value })} placeholder="Introduce your intended use or ask a practical question" /></Field>
+        <Field label="Message"><textarea required minLength={5} maxLength={800} value={requestForm.message} onChange={e => setRequestForm({ ...requestForm, message: e.target.value })} placeholder="Introduce your intended use or ask a practical question" /></Field>
         <p className="rb-field-hint">Requests are coordination only. Payment and final handoff arrangements happen directly between participants.</p>
         <button className="rb-btn" disabled={busy || listings.length === 0}>{busy ? <><span className="rb-busy" />Sending…</> : <><Send />Send request</>}</button>
       </form>
@@ -498,9 +531,37 @@ export default function RebuildPortal({ section }: SectionProps) {
           </form>
         </section>
         <section className="rb-panel"><div className="rb-panel-head"><h2>{isReuse ? "Reuse records" : "Disposal records"}</h2><span>{loading ? "Loading" : `${relevant.length} recorded`}</span></div>
-          {loading ? renderLoading(3) : relevant.length ? <div className="rb-stack">{relevant.map(item => <div className="rb-request" key={item.id}><div className="rb-request-head"><div><h3>{item.type === "reuse" ? "Reuse planned" : item.disposal_category || "Disposal planned"}</h3><span className="rb-tag">{item.status}</span></div><span className="rb-tag neutral">{dateLabel(item.created_at)}</span></div><p>{item.notes || "No notes provided."}</p></div>)}</div> : empty(isReuse ? "No reuse plans recorded" : "No disposal records yet", "Save a plan after choosing a material from your inventory.", isReuse ? <Hammer /> : <Trash2 />)}
+          {loading ? renderLoading(3) : relevant.length ? <div className="rb-stack">{relevant.map(item => <div className="rb-request" key={item.id}><div className="rb-request-head"><div><h3>{item.material_name || (item.type === "reuse" ? "Reuse activity" : item.disposal_category || "Disposal activity")}</h3><span className="rb-tag">{item.status}</span></div><span className="rb-tag neutral">{dateLabel(item.created_at)}</span></div><p>{item.notes || "No notes provided."}</p>{item.status === "planned" && <button type="button" className="rb-btn secondary" disabled={busy} onClick={() => void completeAction(item.id)}><CheckCircle2 />Mark completed</button>}</div>)}</div> : empty(isReuse ? "No reuse plans recorded" : "No disposal records yet", "Save a plan after choosing a material from your inventory.", isReuse ? <Hammer /> : <Trash2 />)}
         </section>
       </div>
+      {isReuse && <section className="rb-panel" style={{ marginTop: 16 }}>
+        <div className="rb-panel-head"><h2>Project ideas</h2><span>Suggestions, not safety assessments</span></div>
+        {loading ? renderLoading(2) : reuseProjects.length ? <div className="rb-cards">{reuseProjects.map(project => {
+          const chosen = materials.find(material => material.id === actionForm.material_id);
+          const matches = chosen ? project.categories.includes(chosen.category) : null;
+          const requirements = project.requirements.map(value => {
+            const item = value && typeof value === "object" ? value as Record<string, unknown> : {};
+            return item;
+          });
+          const requirementLabels = requirements.map(item => [item.material, item.minimum_quantity, item.unit].filter(Boolean).join(" ")).filter(Boolean);
+          const matchingRequirement = chosen && requirements.find(item => item.material === chosen.category);
+          const quantityMatch = chosen && matchingRequirement
+            ? Number(chosen.quantity) >= Number(matchingRequirement.minimum_quantity ?? 0)
+            : null;
+          return <article className="rb-card" key={project.id}>
+            <div className="rb-card-top"><h3>{project.title}</h3><span className="rb-tag">{project.categories.join(", ") || "General"}</span></div>
+            <p>{project.description}</p>
+            <p><strong>Listed requirements:</strong> {requirementLabels.join(" · ") || "Check the project details."}</p>
+            {chosen && <span className={`rb-tag ${matches ? "" : "neutral"}`}>{matches ? `Selected material category matches: ${chosen.category}` : `Selected material category differs: ${chosen.category}`}</span>}
+            {chosen && matchingRequirement && <p className="rb-field-hint">Quantity check: {quantityMatch ? "meets" : "below"} the listed minimum of {String(matchingRequirement.minimum_quantity ?? 0)} {String(matchingRequirement.unit ?? "")}. Confirm units and suitability before use.</p>}
+            <button type="button" className="rb-btn" disabled={busy} onClick={() => void saveReuseProject(project.id)}><Plus />Save as planned project</button>
+          </article>;
+        })}</div> : empty("No project ideas available", "Check the database migration and reload this page.", <Hammer />)}
+        {savedProjects.length > 0 && <div className="rb-stack" style={{ marginTop: 18 }}>
+          <div className="rb-panel-head"><h2>Saved project plans</h2><span>{savedProjects.length} saved</span></div>
+          {savedProjects.map(saved => <div className="rb-material-row" key={saved.id}><span className="rb-material-symbol"><ClipboardList /></span><div className="rb-material-copy"><strong>{saved.reuse_projects?.title || "Saved reuse project"}</strong><span>{saved.status}{saved.notes ? ` · ${saved.notes}` : ""}</span></div></div>)}
+        </div>}
+      </section>}
     </>;
   };
 

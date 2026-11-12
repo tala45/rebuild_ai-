@@ -12,7 +12,7 @@ export async function POST(request: Request) {
     if (!user) return NextResponse.json({ error: "Sign in to use the assistant." }, { status: 401 });
     const parsed = inputSchema.safeParse(await request.json());
     if (!parsed.success) return NextResponse.json({ error: "Enter a question between 2 and 500 characters." }, { status: 400 });
-    const { data: materials, error } = await supabase.from("materials").select("name,category,condition");
+    const { data: materials, error } = await supabase.from("materials").select("name,category,condition").eq("owner_id", user.id);
     if (error) throw error;
     return NextResponse.json({
       answer: answerAssistant(parsed.data.question, materials ?? []),

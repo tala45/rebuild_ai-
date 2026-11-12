@@ -35,7 +35,7 @@
 .rb-nav button:hover { color:var(--rb-forest); background:var(--rb-surface-2); }
 .rb-nav button[aria-current="page"] { color:var(--rb-forest-deep); background:#e6ede2; }
 .rb-nav button:active,.rb-btn:active { transform:scale(.98); }
-.rb-profile { width:34px; height:34px; flex:none; display:grid; place-items:center; background:#e6d8c4; border-radius:50%; color:#5b4b37; font:700 11px "DM Mono",monospace; }
+.rb-profile { width:34px; height:34px; flex:none; display:grid; place-items:center; border:0; cursor:pointer; background:#e6d8c4; border-radius:50%; color:#5b4b37; font:700 11px "DM Mono",monospace; }
 .rb-main { padding:34px 0 72px; animation:rb-enter .3s ease both; }
 @keyframes rb-enter { from { opacity:0; transform:translateY(5px) } to { opacity:1; transform:translateY(0) } }
 .rb-page-head { display:flex; align-items:flex-end; justify-content:space-between; gap:20px; margin-bottom:24px; }
@@ -98,11 +98,13 @@
 .rb-file input { min-height:unset; border:0; padding:0; background:transparent; font-size:11px; box-shadow:none; }
 .rb-toolbar { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:13px; }
 .rb-toolbar-end { display:flex; gap:8px; align-items:center; }
+.rb-toolbar-end select { min-height:38px; max-width:140px; border:1px solid var(--rb-line); border-radius:8px; padding:0 9px; background:#fff; color:var(--rb-ink); font-size:11px; }
 .rb-search-wrap { flex:1; position:relative; max-width:330px; }
 .rb-search-wrap svg { position:absolute; left:10px; top:12px; width:15px; height:15px; color:var(--rb-muted); }
 .rb-search { padding-left:33px; }
 .rb-cards { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:11px; }
 .rb-card { display:flex; flex-direction:column; min-width:0; border:1px solid var(--rb-line); border-radius:12px; background:var(--rb-surface); padding:15px; transition:transform .18s,border-color .18s,box-shadow .18s; }
+.rb-card-image { width:100%; height:150px; object-fit:cover; border-radius:9px; margin-bottom:13px; background:var(--rb-surface-2); }
 .rb-card:hover { transform:translateY(-2px); border-color:#c6d2c4; box-shadow:0 8px 22px rgba(41,70,52,.06); }
 .rb-card-top { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }
 .rb-card h3 { margin:0 0 5px; font:700 14px "Manrope",sans-serif; letter-spacing:-.2px; }
